@@ -75,41 +75,12 @@ def regex_edit(path, pattern, repl, desc, count=0, required=True):
 
 print(f"=== gcmvp customize on {ROOT} ===")
 
-# ---------------------------------------------------------------- 需求 1
-# 禁用中继：get_relay_server 固定返回空串（删除端口+1 的自动推导）
-edit("src/rendezvous_mediator.rs", [(
-    """    fn get_relay_server(&self, provided_by_rendezvous_server: String) -> String {
-        let mut relay_server = Config::get_option("relay-server");
-        if relay_server.is_empty() {
-            relay_server = provided_by_rendezvous_server;
-        }
-        if relay_server.is_empty() {
-            relay_server = crate::increase_port(&self.host, 1);
-        }
-        relay_server
-    }""",
-    """    fn get_relay_server(&self, _provided_by_rendezvous_server: String) -> String {
-        // gcmvp: P2P only — never derive or return a relay server.
-        String::new()
-    }""",
-    "get_relay_server 强制返回空串（禁用中继自动推导）",
-)])
-
-# 直连失败时不回退中继
-edit("src/client.rs", [(
-    """        if (interface.is_force_relay() && typ != "WebRTC") || conn.is_err() {
-            if !relay_server.is_empty() {""",
-    """        if false && ((interface.is_force_relay() && typ != "WebRTC") || conn.is_err()) {
-            if !relay_server.is_empty() {""",
-    "直连失败禁止回退中继",
-)])
-
-# WebRTC 握手失败不再回退中继（把 guard 条件改为永假）
-edit("src/client.rs", [(
-    """            Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {""",
-    """            Err(e) if false && typ == "WebRTC" && !relay_server.is_empty() => {""",
-    "WebRTC 握手失败禁止回退中继",
-)])
+# ---------------------------------------------------------------- 需求 1（已调整 2026-11-26）
+# 原方案完全禁用中继；实测双侧对称 NAT 打洞无法成功，按用户决定恢复
+# RustDesk 原版"打洞优先、失败回退中继"行为：以下三段禁用修改已移除，
+# 源码保持原样即可（get_relay_server 自动推导 hbbs 地址 :21117，
+# client.rs 直连失败回退 request_relay）。
+# 中继仍只作兜底：P2P 成功时画面不过服务器，不产生流量。
 
 # license 安装时写入 relay-server 的行为移除
 edit("src/core_main.rs", [(
