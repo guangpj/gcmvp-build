@@ -1,6 +1,8 @@
 name: Build the flutter version of the RustDesk
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       upload-artifact:
@@ -308,6 +310,23 @@ jobs:
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
 
+      - name: Ensure gcmvp flutter assets (toolbar icons incl. record)
+        # Fallback only: the repo normally carries the full asset set.
+        # Missing icons made toolbar buttons render as blank colored blocks.
+        shell: bash
+        run: |
+          for f in rec.svg record_screen.svg icon.svg actions.svg screen.svg display.svg keyboard_mouse.svg chat.svg close.svg transfer.svg fullscreen.svg file_transfer.svg folder.svg refresh.svg search.svg trash.svg secure.svg insecure.svg pinned.svg unpinned.svg voice_call.svg call_wait.svg; do
+            if [ ! -s "flutter/assets/$f" ]; then
+              for ref in 1.5.3 master; do
+                if curl -fsSL "https://raw.githubusercontent.com/rustdesk/rustdesk/$ref/flutter/assets/$f" -o "flutter/assets/$f" && [ -s "flutter/assets/$f" ]; then
+                  echo "restored missing asset: $f ($ref)"
+                  break
+                fi
+              done
+            fi
+          done
+          echo "flutter/assets file count: $(ls flutter/assets | wc -l)"
+
       - name: Apply gcmvp customization
         shell: bash
         run: |
@@ -354,6 +373,17 @@ jobs:
           } catch {
               Write-Host "Ingore the printer driver error."
           }
+
+      - name: Build gcmvp helper tools (exit + password) and default pwd file
+        # gcmvp-exit.exe  : double-click to fully stop the resident process
+        # gcmvp-pass.exe  : change the shared access password (gcmvp.pwd)
+        # gcmvp.pwd       : default shared password (aa12)
+        shell: bash
+        run: |
+          rustc -O -A warnings -o ./rustdesk/gcmvp-exit.exe tools/gcmvp_exit.rs
+          rustc -O -A warnings -o ./rustdesk/gcmvp-pass.exe tools/gcmvp_pass.rs
+          printf 'aa12' > ./rustdesk/gcmvp.pwd
+          ls -l ./rustdesk/gcmvp-exit.exe ./rustdesk/gcmvp-pass.exe ./rustdesk/gcmvp.pwd
 
       - name: Run the Rust tests
         # x86_64 only: the tests are the same code on arm64, and that runner is the slow one.

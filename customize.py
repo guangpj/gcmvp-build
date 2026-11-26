@@ -73,6 +73,24 @@ def regex_edit(path, pattern, repl, desc, count=0, required=True):
         log("WARN", path, f"正则未匹配: {desc}")
 
 
+def insert_before(path, anchor, block, desc, sentinel=None):
+    """在 anchor 首次出现前插入 block；sentinel（哨兵串）已存在则跳过，保证幂等。"""
+    p = ROOT / path
+    if not p.exists():
+        log("MISS", path, "文件不存在，跳过")
+        return
+    text = p.read_text(encoding="utf-8", errors="surrogateescape")
+    if sentinel and sentinel in text:
+        log("SKIP", path, f"已应用: {desc}")
+        return
+    if anchor in text:
+        p.write_text(text.replace(anchor, block + anchor, 1),
+                     encoding="utf-8", errors="surrogateescape")
+        log("OK", path, desc)
+    else:
+        log("WARN", path, f"未找到锚点: {desc}")
+
+
 print(f"=== gcmvp customize on {ROOT} ===")
 
 # ---------------------------------------------------------------- 需求 1（已调整 2026-11-26）
@@ -111,14 +129,130 @@ edit("src/server/connection.rs", [(
     "连接请求弹窗总闸关闭",
 )])
 
-# 默认配置：永久密码 + password 审批模式 + 隐藏 CM + 不弹窗
-edit("flutter/lib/common.dart", [
+# ---------------------------------------------------------------- 无人值守访问（2026-11-26 追加）
+# 全部走 RustDesk 官方 unattended-access 机制：
+#   verification-method = 仅永久密码   -> 被控端不再显示随机验证码
+#   approve-mode        = password     -> 连接请求不需要点击确认
+#   hide_cm             = true         -> "已连接/权限面板"窗口不再弹出
+# 共享密码：exe 同目录 gcmvp.pwd（纯文本，默认 aa12），每次连接实时读取，
+# gcmvp-pass.exe 修改后立即生效、无需重启；控制端连接时自动携带（只输 ID）。
+# 说明：仅用于自有或已获机主明确授权的设备；程序保持任务管理器可见、
+# 可用随包 gcmvp-exit.exe 退出；不做隐藏进程/自启/反检测。
+
+# 1) 共享密码读取函数（common.rs）
+insert_before("src/common.rs",
+    "#[inline]\npub fn is_custom_client() -> bool {",
+    """// gcmvp: shared access password. Plain-text gcmvp.pwd next to the exe;
+// gcmvp-pass.exe rewrites it without a rebuild. Read fresh on every login
+// attempt so password changes apply immediately. Fallback: built-in default.
+pub fn gcmvp_shared_password() -> String {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("gcmvp.pwd"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("gcmvp.pwd"));
+    }
+    for p in candidates {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            let t = s.trim().to_string();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    "aa12".to_string()
+}
+
+""",
+    "注入共享密码读取函数（默认 aa12）",
+    sentinel="pub fn gcmvp_shared_password")
+
+# 2) 被控端：validate_password 优先校验共享密码
+edit("src/server/connection.rs", [(
+    """    fn validate_password(&mut self, allow_permanent_password: bool) -> bool {
+        if password::temporary_enabled() {""",
+    """    fn validate_password(&mut self, allow_permanent_password: bool) -> bool {
+        // gcmvp: accept the shared static password (gcmvp.pwd, default "aa12")
+        // before any stored-password logic; read fresh on every attempt.
+        {
+            let shared = crate::gcmvp_shared_password();
+            if !shared.is_empty() && self.validate_password_plain(&shared) {
+                self.set_conn_audit_primary_auth(
+                    ConnAuditPrimaryAuth::PermanentPassword,
+                );
+                return true;
+            }
+        }
+        if password::temporary_enabled() {""",
+    "被控端校验共享密码（无人值守固定密码）",
+)])
+
+# 3) 控制端：连接时自动注入共享密码（用户只输 ID 点连接即可）
+edit("src/client.rs", [(
+    "let p = crate::ui_interface::get_builtin_option(keys::OPTION_DEFAULT_CONNECT_PASSWORD);",
+    "let p = crate::gcmvp_shared_password(); // gcmvp: auto shared password (aa12 / gcmvp.pwd)",
+    "控制端自动携带共享密码（只输 ID 即可连接）",
+)])
+
+# 4) 官方无人值守开关：仅永久密码 + 密码审批 + 隐藏连接管理窗口（CM）
+edit("libs/hbb_common/src/password_security.rs", [
     (
-        """  static const String _kOptionApproveMode = 'approve-mode';""",
-        """  static const String _kOptionApproveMode = 'approve-mode';""",
-        "占位（若存在则确认）",
+        """fn verification_method() -> VerificationMethod {
+    let method = Config::get_option("verification-method");
+    if method == "use-temporary-password" {
+        VerificationMethod::OnlyUseTemporaryPassword
+    } else if method == "use-permanent-password" {
+        VerificationMethod::OnlyUsePermanentPassword
+    } else {
+        VerificationMethod::UseBothPasswords // default
+    }
+}""",
+        """fn verification_method() -> VerificationMethod {
+    // gcmvp: unattended access - permanent password only
+    VerificationMethod::OnlyUsePermanentPassword
+}""",
+        "验证方式固定为仅永久密码（不显示随机验证码）",
     ),
-], required=False)
+    (
+        """pub fn approve_mode() -> ApproveMode {
+    let mode = Config::get_option("approve-mode");
+    if mode == "password" {
+        ApproveMode::Password
+    } else if mode == "click" {
+        ApproveMode::Click
+    } else {
+        ApproveMode::Both
+    }
+}""",
+        """pub fn approve_mode() -> ApproveMode {
+    // gcmvp: unattended access - password approval, no click prompt
+    ApproveMode::Password
+}""",
+        "审批模式固定为密码（连接请求不弹确认）",
+    ),
+    (
+        """pub fn hide_cm() -> bool {
+    approve_mode() == ApproveMode::Password
+        && verification_method() == VerificationMethod::OnlyUsePermanentPassword
+        && crate::config::option2bool("allow-hide-cm", &Config::get_option("allow-hide-cm"))
+}""",
+        """pub fn hide_cm() -> bool {
+    // gcmvp: incoming sessions never show the connection-manager window
+    true
+}""",
+        "被控端连接管理窗口（已连接/权限面板）不再显示",
+    ),
+])
+
+# 5) 被控端主页不展示密码面板（密码由共享文件提供，界面只留识别码）
+edit("flutter/lib/desktop/pages/desktop_home_page.dart", [(
+    "      if (!isOutgoingOnly) buildPasswordBoard(context),",
+    "      // gcmvp: password board hidden - fixed shared password via gcmvp.pwd",
+    "隐藏被控端密码面板（识别码保留）",
+)])
 
 # ---------------------------------------------------------------- 需求 3
 # Cargo.toml 品牌
@@ -263,12 +397,11 @@ edit("flutter/lib/desktop/pages/desktop_home_page.dart", [(
     "隐藏帮助/更新卡片",
 )])
 
-# 关闭行为：主窗口不要拦截 X 按钮。否则 UI 初始化失败时窗口永远关不掉。
-edit("flutter/lib/main.dart", [(
-    "windowManager.setPreventClose(true);",
-    "windowManager.setPreventClose(false); // gcmvp: X always closes the app",
-    "主窗口 X 按钮直接关闭",
-)])
+# 关闭行为：恢复官方 setPreventClose(true) —— 点 X 只隐藏窗口，进程常驻后台
+# 继续接受远程连接（无人值守）；真正退出用随包的 gcmvp-exit.exe。
+# （官方 tabbar_widget.onWindowClose 对主窗口执行 windowManager.hide()，
+# 之前改 false 是为修白屏期"关不掉"，白屏根因（FFI）已修复，此处还原。）
+# 不做修改，源码保持官方原样即可。
 
 # 窗口标题强制改为 GCMVP（避免运行时配置仍显示 RustDesk）
 edit("flutter/lib/common.dart", [(
