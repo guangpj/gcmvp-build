@@ -205,6 +205,14 @@ for f in ["src/common.rs", "src/naming.rs", "src/lang/en.rs", "src/lang.rs"]:
         ('"RustDesk"', '"GCMVP"', "品牌字符串 -> GCMVP"),
     ], required=False)
 
+# hbb_common 子模块的 APP_NAME / ORG 默认值：这是 get_rustdesk_app_name() 的
+# 真正来源，Windows 原生层会用它覆盖 main.cpp 里的 app_name，决定窗口标题。
+# 不改这里，标题永远是 "RustDesk"。
+edit("libs/hbb_common/src/config.rs", [
+    ('RwLock::new("RustDesk".to_owned())',
+     'RwLock::new("gcmvp".to_owned())', "APP_NAME 默认值 -> gcmvp"),
+], required=False)
+
 # ---------------------------------------------------------------- 需求 4
 # 被控端极简 UI：删除警告/品牌/logo/提示/帮助卡片，但必须保留
 # buildIDBoard + buildPasswordBoard，否则页面会变成白屏。
