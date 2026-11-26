@@ -318,6 +318,38 @@ edit("flutter/lib/desktop/pages/connection_page.dart", [(
 
 # ---------------------------------------------------------------- 默认内置选项（APP_NAME）
 # 通过编译期环境变量在 workflow 注入，无需改 hbb_common 子模块源码。
+
+# ---------------------------------------------------------------- 可选：编译期注入自建服务器
+# 放一个 server-config.json 在脚本同目录（仓库根）即可把 hbbs 地址和公钥写死进二进制，
+# 这样 exe 名保持 gcmvp.exe、进程名保持 gcmvp、客户零配置双击即用。
+# 文件不存在或 host 为空时，本段完全跳过，不影响其它构建。
+#   {"host": "1.2.3.4", "key": "ROx6...NTQ="}
+import json
+_cfg_path = Path(__file__).resolve().parent / "server-config.json"
+if _cfg_path.exists():
+    try:
+        _cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
+        _host = str(_cfg.get("host", "")).strip()
+        _key = str(_cfg.get("key", "")).strip()
+        if _host:
+            _host_with_port = _host if ":" in _host else f"{_host}:21116"
+            edit("libs/hbb_common/src/config.rs", [
+                ('pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());',
+                 f'pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("{_host_with_port}".to_owned());',
+                 f"编译期内置 hbbs 地址 {_host_with_port}"),
+                ('pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];',
+                 f'pub const RENDEZVOUS_SERVERS: &[&str] = &["{_host}"];',
+                 "公共服务器列表替换为自建地址"),
+            ] + ([(
+                'pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";',
+                f'pub const RS_PUB_KEY: &str = "{_key}";',
+                "内置 hbbs 公钥",
+            )] if _key else []), required=False)
+        else:
+            print("[INFO] server-config.json 存在但 host 为空，跳过服务器注入")
+    except Exception as _e:
+        print(f"[WARN] server-config.json 解析失败，跳过服务器注入: {_e}")
+
 print("\n=== summary ===")
 from collections import Counter
 c = Counter(t for t, _, _ in CHANGES)
