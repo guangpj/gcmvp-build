@@ -199,6 +199,40 @@ edit("flutter/windows/runner/main.cpp", [
      'std::wstring app_name = L"GCMVP";', "app_name"),
 ])
 
+# 关键：Dart 层 FFI 仍按文件名加载 Rust 核心库。只改 C++/CMake 不够，
+# 不改这里 Flutter 初始化会抛 "Failed to load dynamic library 'librustdesk.dll'"
+# 并直接白屏（native_model.dart:145 -> initEnv -> runMainApp）。
+edit("flutter/lib/models/native_model.dart", [(
+    "DynamicLibrary.open('librustdesk.dll')",
+    "DynamicLibrary.open('libgcmvp.dll')",
+    "Dart FFI 加载 libgcmvp.dll（修复白屏根因）",
+)])
+
+# Sciter/安装路径与便携打包器默认可执行名，避免仍去找 rustdesk.exe
+edit("src/platform/windows.rs", [(
+    'let dst = dir.join("rustdesk.exe");',
+    'let dst = dir.join("gcmvp.exe");',
+    "Windows 服务辅助程序名 -> gcmvp.exe",
+)])
+edit("libs/portable/generate.py", [(
+    "options.executable = 'rustdesk.exe'",
+    "options.executable = 'gcmvp.exe'",
+    "便携打包器默认可执行名 -> gcmvp.exe",
+)])
+edit("build.py", [(
+    "f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/rustdesk.exe'",
+    "f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gcmvp.exe'",
+    "build.py 便携打包入口 -> gcmvp.exe",
+)])
+
+# 隐私模式注入进程名清掉 RustDesk 痕迹（该辅助 exe 不随包交付，仅避免二进制残留）
+for f in ["libs/portable/src/main.rs", "src/privacy_mode/win_topmost_window.rs"]:
+    edit(f, [(
+        '"RuntimeBroker_rustdesk.exe"',
+        '"RuntimeBroker_gcmvp.exe"',
+        "置顶注入进程名 -> RuntimeBroker_gcmvp.exe",
+    )], required=False)
+
 # 全局字符串残留：把面向用户可见的 RustDesk 替换为 GCMVP（谨慎，只处理明确品牌串）
 for f in ["src/common.rs", "src/naming.rs", "src/lang/en.rs", "src/lang.rs"]:
     edit(f, [
