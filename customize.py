@@ -454,6 +454,29 @@ edit("flutter/lib/common.dart", [(
     "禁止活动窗口为空时自动退出（关窗常驻核心）",
 )])
 
+# ---------------------------------------------------------------- 关窗后视频流中断修复（2026-11-27）
+# 用户实测：关窗后进程虽常驻，但控制端卡在"已连接，等待画面传输"，必须 gcmvp-exit
+# 强杀全部进程重启才恢复。根因：关闭主窗口时 window_manager 广播 onWindowClose 给所有
+# listener，_ConnectionPageState.onWindowClose 会调用 bind.mainOnMainWindowClose()，
+# 在 Windows 便携/未安装模式下它执行 drop_portable_service_shared_memory() 清空
+# 画面共享内存。官方紧接着退出整个进程所以无害；我们改成"隐藏不退进程"后，
+# 共享内存被清、server 视频采集进程还活着 → 采集断流，控制端永远等不到第一帧。
+# 修复：关窗隐藏时不再清理共享内存（进程真退出时 OS 自动回收，gcmvp-exit 强杀不受影响）。
+edit("flutter/lib/desktop/pages/connection_page.dart", [(
+    """  void onWindowClose() {
+    super.onWindowClose();
+    bind.mainOnMainWindowClose();
+  }""",
+    """  void onWindowClose() {
+    super.onWindowClose();
+    // gcmvp: do NOT drop portable shared memory here. We hide (not exit) on
+    // close; clearing the frame shmem would kill the server video capture and
+    // leave the peer stuck at "waiting for image" until a full process restart.
+    // bind.mainOnMainWindowClose();
+  }""",
+    "关窗隐藏时不清空便携共享内存（修复视频流中断）",
+)])
+
 # ---------------------------------------------------------------- 录屏保存路径提示（2026-11-27 追加）
 # 官方点录制/停止没有任何提示，且录像状态回传通道 tx=None，用户找不到文件。
 # 在 RecordingModel.toggle() 里加弹窗：开始/停止都显示录像保存目录。
