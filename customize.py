@@ -402,26 +402,23 @@ edit("flutter/lib/desktop/pages/desktop_home_page.dart", [(
 )])
 
 # ---------------------------------------------------------------- 关窗后台常驻（2026-11-27 重做）
-# 本机实测：双击 exe 后发 WM_CLOSE，两个 gcmvp 进程全部退出。
-# 根因：主窗口 setPreventClose(true) 把 WM_CLOSE 转成 onWindowClose 事件，
-# 但主窗口没有注册任何 WindowListener 接管，事件无人处理 → 窗口销毁、进程退出。
-# 修复：注册全局 WindowListener，onWindowClose 时只 hide()，进程/service 常驻。
-# 真正退出仍只用随包 gcmvp-exit.exe（它发 IPC Close 让进程真正退出）。
+# 本机实测：双击 exe 后发 WM_CLOSE → 两个 gcmvp 进程全部退出。
+# 抓日志定位到真正根因（两层）：
+#   1) setPreventClose(true) 把 WM_CLOSE 转成 onWindowClose 事件，主窗口原本
+#      没有任何 WindowListener 接管 → 需注册 listener 在 onWindowClose 里 hide()。
+#   2) 关键：hide() 后主窗口从活动窗口集合注销，触发 onActiveWindowChanged()，
+#      它发现 getActiveWindows().isEmpty 就主动 windowManager.close() 退出整个应用
+#      （日志里的 "Start closing RustDesk..."）。这才是关窗退出的真正元凶。
+# 修复：注册 listener 负责 hide；并让 onActiveWindowChanged 在窗口集合为空时
+# 直接返回、不退出。真正退出仍只用随包 gcmvp-exit.exe（发 IPC Close 给进程）。
 
-# 根因修复：主窗口虽然 setPreventClose(true)，但没有任何 WindowListener
-# 接管 onWindowClose，导致 WM_CLOSE 直接销毁窗口、进程退出（本机实测确认）。
-# 这里注册一个全局 listener，在主窗口关闭时只做 hide()，从而真正实现
-# "关窗不退进程"。真正退出仍用 gcmvp-exit.exe。
 insert_before("flutter/lib/main.dart",
     "void runMainApp(bool startService) async {",
     """// gcmvp: guard the main window so closing it hides instead of exiting.
-// setPreventClose(true) routes WM_CLOSE here; without a listener the window
-// is destroyed and the whole process exits (verified locally).
 class _GcmvpWindowGuard with WindowListener {
   @override
   void onWindowClose() async {
     if (kWindowId == null || kWindowId == 0) {
-      // main window
       await windowManager.hide();
     } else {
       await WindowController.fromWindowId(kWindowId!).hide();
@@ -444,6 +441,17 @@ edit("flutter/lib/main.dart", [(
     windowManager.addListener(_gcmvpWindowGuard); // gcmvp: keep alive on close
     if (isMacOS) {""",
     "主窗口注册关窗守卫 listener",
+)])
+
+# 关键：堵住 onActiveWindowChanged 的"最后一个窗口关闭就退出"逻辑
+edit("flutter/lib/common.dart", [(
+    """  print(
+      "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
+  if (rustDeskWinManager.getActiveWindows().isEmpty) {""",
+    """  print(
+      "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
+  if (false && rustDeskWinManager.getActiveWindows().isEmpty) { // gcmvp: never auto-quit when all windows hidden""",
+    "禁止活动窗口为空时自动退出（关窗常驻核心）",
 )])
 
 # ---------------------------------------------------------------- 录屏保存路径提示（2026-11-27 追加）
