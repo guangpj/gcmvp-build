@@ -148,6 +148,93 @@ NEW_TAB = """            // gcmvp-agent: keep only minimize + close, no settings
 edit("flutter/lib/desktop/pages/desktop_tab_page.dart",
      OLD_TAB, NEW_TAB, "标题栏只留最小化+关闭，去设置/全屏/左上角 icon")
 
+# ---------------------------------------------------------------- 关窗断流修复
+# 被控端关极简 ID 窗口后，DesktopServerPage.onWindowClose() 会 closeAll()+
+# gFFI.close() 断开所有连接并关闭 core，导致控制端断流。改成只隐藏、保持服务。
+OLD_SERVER_CLOSE = """  @override
+  void onWindowClose() {
+    // Other platforms keep the old behaviour exactly: the ambiguity this guards against is a
+    // Linux session logout, which closes every window in the session.
+    final byOperator = _cmClosedByOperator || !isLinux;
+    Future.wait([gFFI.serverModel.closeAll(byOperator: byOperator), gFFI.close()]).then((_) {
+      if (isMacOS) {
+        RdPlatformChannel.instance.terminate();
+      } else {
+        windowManager.setPreventClose(false);
+        windowManager.close();
+      }
+    });
+    super.onWindowClose();
+  }"""
+NEW_SERVER_CLOSE = """  @override
+  void onWindowClose() {
+    // gcmvp-agent: hide only - do NOT closeAll()/gFFI.close() here.
+    // Closing the compact ID window must keep serving the connected controller.
+    windowManager.hide();
+    super.onWindowClose();
+  }"""
+edit("flutter/lib/desktop/pages/server_page.dart",
+     OLD_SERVER_CLOSE, NEW_SERVER_CLOSE,
+     "关极简窗口只隐藏、不断开连接（修复断流）")
+
+# ---------------------------------------------------------------- 禁止 UAC 提权弹窗
+# 便携单 exe 未安装：控制端请求提权/启动 --portable-service 时，
+# elevate_or_run_as_system() 会 ShellExecute(runas) 弹 Windows UAC。
+# 无人值守场景没人点 UAC，弹了反而卡住：直接让该函数不发起提权。
+OLD_ELEVATE = """pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_system: bool) {
+    // avoid possible run recursively due to failed run.
+    log::info!("""
+NEW_ELEVATE = """pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_system: bool) {
+    // gcmvp-agent: never trigger a UAC prompt (unattended agent, no one to click it).
+    // The main process still captures the screen via GDI/DXGI fallback, so normal
+    // remote view/control keeps working without an elevated portable service.
+    // Gate on an opt-in env var so the rest of the function stays reachable (no
+    // unreachable_code lint): by default it is absent -> return immediately.
+    if std::env::var_os("GCMVP_ALLOW_ELEVATE").is_none() {
+        log::info!("gcmvp-agent: elevation suppressed (no UAC prompt)");
+        return;
+    }
+    // avoid possible run recursively due to failed run.
+    log::info!("""
+edit("src/platform/windows.rs", OLD_ELEVATE, NEW_ELEVATE,
+     "禁止 UAC 提权弹窗（无人值守被控端）")
+
+# 控制端连接管理窗口不再显示"提权"按钮：can_elevate() 返回 false。
+OLD_CAN_ELEVATE = """pub fn can_elevate() -> bool {
+    #[cfg(windows)]
+    return !crate::platform::is_installed();
+    #[cfg(not(windows))]
+    return false;
+}"""
+NEW_CAN_ELEVATE = """pub fn can_elevate() -> bool {
+    // gcmvp-agent: hide the elevation button - agent never elevates (no UAC).
+    return false;
+}"""
+edit("src/ui_cm_interface.rs", OLD_CAN_ELEVATE, NEW_CAN_ELEVATE,
+     "隐藏提权按钮（不再请求提权）")
+
+# 打开需要管理员权限的软件时，被控端 portable_check() 每秒上报 UAC /
+# foreground-elevated 状态，控制端收到后自动弹"请求提权"对话框。
+# 无人值守场景不需要这些提示：整个 portable_check() 直接返回。
+OLD_PORTABLE_CHECK = """    fn portable_check(&mut self) {
+        if self.portable.is_installed || !self.is_remote() || !self.keyboard {
+            return;
+        }"""
+NEW_PORTABLE_CHECK = """    fn portable_check(&mut self) {
+        // gcmvp-agent: never report UAC / foreground-elevated state, so the
+        // controller won't auto-pop the "Request Elevation" dialog when an
+        // admin-privileged app is opened on the agent side.
+        // Env-gated so the rest stays reachable (no unreachable_code lint);
+        // absent by default -> skip all elevation reporting.
+        if std::env::var_os("GCMVP_ALLOW_ELEVATE").is_none() {
+            return;
+        }
+        if self.portable.is_installed || !self.is_remote() || !self.keyboard {
+            return;
+        }"""
+edit("src/server/connection.rs", OLD_PORTABLE_CHECK, NEW_PORTABLE_CHECK,
+     "不上报 UAC/提权状态，控制端不再弹请求提权框")
+
 # ---------------------------------------------------------------- 固定小窗口
 # customize.py 已在 setPreventClose 后插入窗口守卫 listener，锚点要带上它。
 OLD_WIN = """    await windowManager.ensureInitialized();
