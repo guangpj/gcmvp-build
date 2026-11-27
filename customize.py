@@ -190,11 +190,15 @@ edit("src/server/connection.rs", [(
     "被控端校验共享密码（无人值守固定密码）",
 )])
 
-# 3) 控制端：连接时自动注入共享密码（用户只输 ID 点连接即可）
+# 3) 控制端：不自动注入密码（2026-11-27 按用户要求改回手动输入）
+# 之前曾把默认连接密码自动设为 gcmvp.pwd(aa12)，导致控制端点连接直接跳过
+# 密码输入框；用户明确要求"连的时候必须输 aa12"。因此这里不做自动注入，
+# 保留官方 get_builtin_option 原样；被控端仍用上面的共享密码校验 aa12。
+# 幂等清理：若源码里残留上一版自动注入，则还原为官方读取。
 edit("src/client.rs", [(
-    "let p = crate::ui_interface::get_builtin_option(keys::OPTION_DEFAULT_CONNECT_PASSWORD);",
     "let p = crate::gcmvp_shared_password(); // gcmvp: auto shared password (aa12 / gcmvp.pwd)",
-    "控制端自动携带共享密码（只输 ID 即可连接）",
+    "let p = crate::ui_interface::get_builtin_option(keys::OPTION_DEFAULT_CONNECT_PASSWORD);",
+    "控制端恢复手动输入密码（不自动带 aa12）",
 )])
 
 # 4) 官方无人值守开关：仅永久密码 + 密码审批 + 隐藏连接管理窗口（CM）
@@ -397,11 +401,90 @@ edit("flutter/lib/desktop/pages/desktop_home_page.dart", [(
     "隐藏帮助/更新卡片",
 )])
 
-# 关闭行为：恢复官方 setPreventClose(true) —— 点 X 只隐藏窗口，进程常驻后台
-# 继续接受远程连接（无人值守）；真正退出用随包的 gcmvp-exit.exe。
-# （官方 tabbar_widget.onWindowClose 对主窗口执行 windowManager.hide()，
-# 之前改 false 是为修白屏期"关不掉"，白屏根因（FFI）已修复，此处还原。）
-# 不做修改，源码保持官方原样即可。
+# ---------------------------------------------------------------- 关窗后台常驻（2026-11-27 重做）
+# 本机实测：双击 exe 后发 WM_CLOSE，两个 gcmvp 进程全部退出。
+# 根因：主窗口 setPreventClose(true) 把 WM_CLOSE 转成 onWindowClose 事件，
+# 但主窗口没有注册任何 WindowListener 接管，事件无人处理 → 窗口销毁、进程退出。
+# 修复：注册全局 WindowListener，onWindowClose 时只 hide()，进程/service 常驻。
+# 真正退出仍只用随包 gcmvp-exit.exe（它发 IPC Close 让进程真正退出）。
+
+# 根因修复：主窗口虽然 setPreventClose(true)，但没有任何 WindowListener
+# 接管 onWindowClose，导致 WM_CLOSE 直接销毁窗口、进程退出（本机实测确认）。
+# 这里注册一个全局 listener，在主窗口关闭时只做 hide()，从而真正实现
+# "关窗不退进程"。真正退出仍用 gcmvp-exit.exe。
+insert_before("flutter/lib/main.dart",
+    "void runMainApp(bool startService) async {",
+    """// gcmvp: guard the main window so closing it hides instead of exiting.
+// setPreventClose(true) routes WM_CLOSE here; without a listener the window
+// is destroyed and the whole process exits (verified locally).
+class _GcmvpWindowGuard with WindowListener {
+  @override
+  void onWindowClose() async {
+    if (kWindowId == null || kWindowId == 0) {
+      // main window
+      await windowManager.hide();
+    } else {
+      await WindowController.fromWindowId(kWindowId!).hide();
+    }
+  }
+}
+
+final _gcmvpWindowGuard = _GcmvpWindowGuard();
+
+""",
+    "注册主窗口关闭守卫（hide 而非退出）",
+    sentinel="class _GcmvpWindowGuard")
+
+edit("flutter/lib/main.dart", [(
+    """    await windowManager.ensureInitialized();
+    windowManager.setPreventClose(true);
+    if (isMacOS) {""",
+    """    await windowManager.ensureInitialized();
+    windowManager.setPreventClose(true);
+    windowManager.addListener(_gcmvpWindowGuard); // gcmvp: keep alive on close
+    if (isMacOS) {""",
+    "主窗口注册关窗守卫 listener",
+)])
+
+# ---------------------------------------------------------------- 录屏保存路径提示（2026-11-27 追加）
+# 官方点录制/停止没有任何提示，且录像状态回传通道 tx=None，用户找不到文件。
+# 在 RecordingModel.toggle() 里加弹窗：开始/停止都显示录像保存目录。
+edit("flutter/lib/models/model.dart", [(
+    """    await bind.sessionRecordScreen(sessionId: sessionId, start: value);
+  }
+
+  updateStatus(bool status) {
+    _start = status;
+    notifyListeners();
+  }
+}""",
+    """    await bind.sessionRecordScreen(sessionId: sessionId, start: value);
+    // gcmvp: show where recordings are saved (official build gives no hint).
+    try {
+      final dir = bind.mainVideoSaveDirectory(root: false);
+      final dm = parent.target?.dialogManager;
+      if (dm != null) {
+        msgBox(
+          sessionId,
+          'custom-nook-nocancel-hasclose',
+          value ? 'Recording started' : 'Recording saved',
+          value
+              ? 'Video will be saved to:\\n$dir'
+              : 'Recording saved to:\\n$dir',
+          '',
+          dm,
+        );
+      }
+    } catch (_) {}
+  }
+
+  updateStatus(bool status) {
+    _start = status;
+    notifyListeners();
+  }
+}""",
+    "录屏开始/停止弹窗显示保存路径",
+)])
 
 # 窗口标题强制改为 GCMVP（避免运行时配置仍显示 RustDesk）
 edit("flutter/lib/common.dart", [(
