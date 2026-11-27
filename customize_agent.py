@@ -148,35 +148,6 @@ NEW_TAB = """            // gcmvp-agent: keep only minimize + close, no settings
 edit("flutter/lib/desktop/pages/desktop_tab_page.dart",
      OLD_TAB, NEW_TAB, "标题栏只留最小化+关闭，去设置/全屏/左上角 icon")
 
-# ---------------------------------------------------------------- 关窗断流修复
-# 被控端关极简 ID 窗口后，DesktopServerPage.onWindowClose() 会 closeAll()+
-# gFFI.close() 断开所有连接并关闭 core，导致控制端断流。改成只隐藏、保持服务。
-OLD_SERVER_CLOSE = """  @override
-  void onWindowClose() {
-    // Other platforms keep the old behaviour exactly: the ambiguity this guards against is a
-    // Linux session logout, which closes every window in the session.
-    final byOperator = _cmClosedByOperator || !isLinux;
-    Future.wait([gFFI.serverModel.closeAll(byOperator: byOperator), gFFI.close()]).then((_) {
-      if (isMacOS) {
-        RdPlatformChannel.instance.terminate();
-      } else {
-        windowManager.setPreventClose(false);
-        windowManager.close();
-      }
-    });
-    super.onWindowClose();
-  }"""
-NEW_SERVER_CLOSE = """  @override
-  void onWindowClose() {
-    // gcmvp-agent: hide only - do NOT closeAll()/gFFI.close() here.
-    // Closing the compact ID window must keep serving the connected controller.
-    windowManager.hide();
-    super.onWindowClose();
-  }"""
-edit("flutter/lib/desktop/pages/server_page.dart",
-     OLD_SERVER_CLOSE, NEW_SERVER_CLOSE,
-     "关极简窗口只隐藏、不断开连接（修复断流）")
-
 # ---------------------------------------------------------------- 固定小窗口
 # customize.py 已在 setPreventClose 后插入窗口守卫 listener，锚点要带上它。
 OLD_WIN = """    await windowManager.ensureInitialized();
