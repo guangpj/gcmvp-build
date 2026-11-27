@@ -78,43 +78,75 @@ NEW_BUILD = """  @override
   Widget build(BuildContext context) {
     super.build(context);
     // gcmvp-agent: one centered box, showing only the device ID.
-    final id = gFFI.serverModel.serverId.text;
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F7FB),
-      body: Center(
-        child: Container(
-          width: 320,
-          height: 116,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFF2F65BA), width: 2),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x22000000),
-                blurRadius: 10,
-                offset: Offset(0, 3),
+    // serverId 由 fetchID() 每秒刷新并 notifyListeners()，必须监听，否则
+    // build 只发生一次，永远停在初始的 "Generating ..."（正在生成中）。
+    return ListenableBuilder(
+      listenable: gFFI.serverModel,
+      builder: (context, _) {
+        final id = gFFI.serverModel.serverId.text;
+        return Scaffold(
+          backgroundColor: const Color(0xFFF4F7FB),
+          body: Center(
+            child: Container(
+              width: 320,
+              height: 116,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFF2F65BA), width: 2),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x22000000),
+                    blurRadius: 10,
+                    offset: Offset(0, 3),
+                  ),
+                ],
               ),
-            ],
-          ),
-          child: SelectableText(
-            id,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 38,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 2,
-              color: Color(0xFF1B3A6B),
+              child: SelectableText(
+                id,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 38,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2,
+                  color: Color(0xFF1B3A6B),
+                ),
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }"""
 
 edit("flutter/lib/desktop/pages/desktop_home_page.dart",
-     OLD_BUILD, NEW_BUILD, "被控端主页替换为极简 ID 框")
+     OLD_BUILD, NEW_BUILD, "被控端主页替换为极简 ID 框（监听 ID 刷新）")
+
+# ---------------------------------------------------------------- 标题栏按钮
+# 主页被 DesktopTab 包着：tail=设置、showMaximize=最大化/全屏、showLogo=左上角图标。
+# 被控端只要右上角"最小化 + 关闭"，其余全部去掉。
+OLD_TAB = """            body: DesktopTab(
+              controller: tabController,
+              tail: Offstage(
+                offstage: bind.isIncomingOnly() || bind.isDisableSettings(),
+                child: ActionIcon(
+                  message: 'Settings',
+                  icon: IconFont.menu,
+                  onTap: DesktopTabPage.onAddSetting,
+                  isClose: false,
+                ),
+              ),
+            )));"""
+NEW_TAB = """            // gcmvp-agent: keep only minimize + close, no settings/logo/maximize.
+            body: DesktopTab(
+              controller: tabController,
+              showLogo: false,
+              showMaximize: false,
+              tail: null,
+            )));"""
+edit("flutter/lib/desktop/pages/desktop_tab_page.dart",
+     OLD_TAB, NEW_TAB, "标题栏只留最小化+关闭，去设置/全屏/左上角 icon")
 
 # ---------------------------------------------------------------- 固定小窗口
 # customize.py 已在 setPreventClose 后插入窗口守卫 listener，锚点要带上它。
