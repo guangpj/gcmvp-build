@@ -133,6 +133,18 @@ NEW_WIN = """    await windowManager.ensureInitialized();
 edit("flutter/lib/main.dart", OLD_WIN, NEW_WIN,
      "被控端窗口固定为 420x220")
 
+# windowManager 的 waitUntilReadyToShow 回调里还会用上次保存的位置/尺寸
+# 覆盖上面的 setSize（实测恢复成 800x600），必须在那里再固定一次。
+OLD_RESTORE = """    // Restore the location of the main window before window hide or show.
+    await restoreWindowPosition(WindowType.Main);"""
+NEW_RESTORE = """    // gcmvp-agent: do not restore old geometry; keep the compact ID box.
+    await windowManager.setSize(const Size(420, 220));
+    await windowManager.setMinimumSize(const Size(420, 220));
+    await windowManager.setMaximumSize(const Size(420, 220));
+    await windowManager.center();"""
+edit("flutter/lib/main.dart", OLD_RESTORE, NEW_RESTORE,
+     "禁止旧窗口配置覆盖被控端小窗口")
+
 # ---------------------------------------------------------------- 便携包品牌残留
 # 单 exe 自解压目录名与打包器资源元数据也去掉 RustDesk 痕迹。
 edit("libs/portable/src/main.rs",
