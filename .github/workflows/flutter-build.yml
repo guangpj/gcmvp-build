@@ -13,6 +13,13 @@ on:
         description: "Artifact tag"
         type: string
         default: "gcmvp-1.5.3"
+      build-profile:
+        description: "controller = full UI (folder) / agent = ID-only single exe"
+        type: choice
+        options:
+          - controller
+          - agent
+        default: controller
   workflow_call:
     inputs:
       upload-artifact:
@@ -24,6 +31,9 @@ on:
       publish-update-metadata:
         type: boolean
         default: false
+      build-profile:
+        type: string
+        default: "controller"
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -69,6 +79,9 @@ env:
   NDK_VERSION: "r28c"
   APP_NAME: gcmvp
   ORG: gcmvp
+  # controller = full remote-control UI (folder build)
+  # agent      = ID-only panel, single portable exe
+  BUILD_PROFILE: ${{ inputs.build-profile || 'controller' }}
   PYTHONIOENCODING: "utf-8"
   PYTHONUTF8: "1"
   #signing keys env variable checks
@@ -330,14 +343,25 @@ jobs:
       - name: Apply gcmvp customization
         shell: bash
         run: |
-          python3 customize.py .
-          echo "gcmvp customization applied"
+          if [ "${BUILD_PROFILE}" = "agent" ]; then
+            python3 customize_agent.py .
+            echo "gcmvp AGENT customization applied (ID-only UI + icon)"
+          else
+            python3 customize.py .
+            echo "gcmvp CONTROLLER customization applied (full UI)"
+          fi
 
       - name: Build rustdesk
         run: |
           # Windows: build RustDesk
           # --hwcodec is shared by all Windows targets; per-target extras (e.g. --vram) come from the matrix
-          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec ${{ matrix.job.build-args }}
+          # agent profile skips --skip-portable-pack so build.py produces a
+          # single self-extracting gcmvp.exe (no dll/folder dependencies)
+          if ($env:BUILD_PROFILE -eq "agent") {
+            python3 .\build.py --portable --flutter --hwcodec ${{ matrix.job.build-args }}
+          } else {
+            python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec ${{ matrix.job.build-args }}
+          }
           mv ./flutter/build/windows/${{ matrix.job.flutter-arch }}/runner/Release ./rustdesk
 
           # Download usbmmidd_v2.zip and extract it to ./rustdesk
@@ -375,6 +399,8 @@ jobs:
           }
 
       - name: Build gcmvp helper tools (exit + password) and default pwd file
+        # agent ships as a single exe with built-in aa12; no helper files needed
+        if: env.BUILD_PROFILE != 'agent'
         # gcmvp-exit.exe  : double-click to fully stop the resident process
         # gcmvp-pass.exe  : change the shared access password (gcmvp.pwd)
         # gcmvp.pwd       : default shared password (aa12)
@@ -419,11 +445,23 @@ jobs:
           name: ${{ matrix.job.arch == 'aarch64' && 'topmostwindow-artifacts-ARM64' || 'topmostwindow-artifacts-x64' }}
           path: "./rustdesk"
 
+      - name: Package agent single exe
+        if: env.BUILD_PROFILE == 'agent'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path . -Filter "rustdesk-*-install.exe" | Select-Object -First 1
+          if (-not $exe) { throw "portable single-file exe not found" }
+          Write-Host "Portable exe: $($exe.FullName) ($($exe.Length) bytes)"
+          Copy-Item $exe.FullName ./rustdesk/gcmvp.exe -Force
+          # agent must be one exe and nothing else
+          Get-ChildItem ./rustdesk | Where-Object { $_.Name -ne "gcmvp.exe" } | Remove-Item -Recurse -Force
+          Get-ChildItem ./rustdesk | Select-Object Name,Length
+
       - name: Upload unsigned
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: gcmvp-unsigned-windows-${{ matrix.job.arch }}
+          name: gcmvp${{ env.BUILD_PROFILE == 'agent' && '-agent' || '' }}-unsigned-windows-${{ matrix.job.arch }}
           path: rustdesk
 
       - name: Sign rustdesk files
